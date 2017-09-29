@@ -1,0 +1,312 @@
+---
+title: "Introduction to RStan"
+author: "Chris Challis"
+date: "September 29, 2017"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: spacelab
+    highlight: espresso 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+source("~/adobe-palette.R")
+```
+
+## Tutorials and Resources 
+
+The best page for getting started specifically with RStan is [here](https://github.com/stan-dev/rstan/wiki/RStan-Getting-Started), including instructions for installing RStan, as well as some introductory examples. For general info and tutorials on Stan and Hamiltonian Monte Carlo, look [here](http://mc-stan.org/users/documentation/tutorials).
+
+Don't forget the material that Kevin Van Horn presented at ART Forum https://github.com/ksvanhorn/ART-Forum-2017-Stan-Tutorial
+
+## Getting Started
+
+Any time we want to use rstan or change the system settings, we need to load the library.
+
+```{r, message=FALSE, warning=FALSE}
+library(rstan)
+```
+
+### System Options
+
+When running RStan in an environment with plenty of RAM and multiple cores, first execute
+```{r}
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+These options respectively allow you to automatically save a bare version of a compiled Stan program to the hard disk so that it does not need to be recompiled and to execute multiple Markov chains in parallel.
+
+### Main Function
+
+The workhorse of RStan is the function `stan`. The function can take many arguments, but four are enough to get started: a `.stan` file defining the model to fit, an object containing the data, and the number of iterations and chains to use in sampling.
+
+```{r, eval=FALSE}
+fit = stan(file = "example.stan", data = example_dat, iter = 1000, chains = 4)
+```
+
+The data argument can be omitted, with variables containing the data and variables instead defined in the `.stan` file.
+
+### `.stan` Syntax
+
+The main components of a `.stan` file are `data`, `parameters`, and `model`. 
+
+```{r, eval=FALSE}
+data{
+  int<lower=0> N;
+  int<lower=0> y[N];
+}
+parameters{
+  real lambda;
+}
+model{
+  lambda ~ gamma(1, 1);
+  for (n in 1:N){
+    y[n] ~ poisson(lambda);
+  }
+}
+```
+One appeal of Stan is that the notation is very similar to how we write out a model in text. The `.stan` file above corresponds to a simple Poisson model with a Gamma prior on the rate:
+
+$$
+\begin{align*}
+  y_i &\sim \text{Poi}(\lambda) \\
+  \lambda &\sim \text{Gamma}(1,1)
+\end{align*}
+$$
+
+## Dominion Rankings Example
+
+Many algorithms for calculating relative rankings of players in a game have been proposed. Rather than relying on an existing algorithm, we can instead set up a fully Bayesian model to estimate the skill level of Adobe lunch-time Dominion players.
+
+For now, we will make a simplifying assumption common to rankings of multiplayer games: we will treat the outcome of each multiplayer game as the set of all of the pairwise outcomes. So the result $(A\;30, B\;27, C\;21)$ is treated as $(A\;30, B\;27)$, $(A\;30, C\;21)$, and $(B\;27, C\;21)$: two wins for $A$, a win and loss for $B$, and two losses for $C$. We could instead directly define a likelihood directly on the multiplayer game, but we'll leave that for another day.
+
+For the likelihood, we need a formula that takes the skill level of two players and returns the probability that each wins the game. The logistic curve and normal cdf are common choices for this; I chose the logistic because it has somewhat heavier tails than the the normal curve.
+
+```{r, echo=FALSE}
+logistic = function(x){
+  1 / (1 + exp(-x))
+}
+
+xx = (-100:100) / 25
+df = data.frame(x = c(xx, xx), prob = c(logistic(xx), pnorm(xx)), type = c(rep("Logit", length(xx)), rep("Normal", length(xx))))
+
+ggplot(df, aes(x, prob, color=type)) + geom_line() + xlab("Difference in Skill Level") +
+  ylab("Probability of Win") + scale_color_manual(values = c(A.blue, A.red))
+```
+
+
+$$
+\text{Pr}(i \; \text{beats} \; j) = \frac{1}{1 + e^{\theta_j - \theta_i}}
+$$
+All we need to complete a first version of our model is a prior on the $\theta_i$, say $\theta_i \sim \text{N}(0,1)$. However, there are a few additional details we can add to make our model more robust and flexible to the data.
+
+### Ties
+The first thing to add is the fact that ties are possible in Dominion. I didn't see as much in the literature about how to handle this possibility. A natural place to start is that the probability of a tie is proportional to the probability that the better player wins. So with $\delta$ as the probability that equal-skill players tie, we have:
+
+$$
+\text{Pr}(i \; \text{ties} \; j) = \frac{2\delta}{1 + e^{|\theta_j - \theta_i|}}
+$$
+This, however results in a sharp peak in the probability, shown in the figure below on the left. A simple alternative to smooth this out is: 
+
+$$
+\text{Pr}(i \; \text{ties} \; j) = \frac{2\delta}{1 + e^{(\theta_j - \theta_i)^2}}
+$$
+
+
+```{r, echo=FALSE, fig.height=4, fig.width=9}
+dlt = 0.3
+
+tie1 = function(delta, x, s){
+  2*delta / (1 + exp(s * abs(x)))
+}
+
+tie2 = function(delta, x, s){
+  2*delta / (1 + exp(s * x^2))
+}
+
+df = data.frame(x = rep(xx, 4), prob = c(logistic(xx) * (1-tie1(dlt, xx, 1)),
+                                         tie1(dlt, xx, 1),
+                                         logistic(xx) * (1-tie2(dlt, xx, 0.5)),
+                                         tie2(dlt, xx, 0.5)
+                                         ), 
+                type = c(rep("log1", length(xx)),
+                         rep("tie1", length(xx)),
+                         rep("log2", length(xx)),
+                         rep("tie2", length(xx)))
+)
+
+tie1_df = df %>% filter(type %in% c("log1", "tie1"))
+tie2_df = df %>% filter(type %in% c("log2", "tie2"))
+
+text_df = data.frame(x = c(0, 3, -3), y = c(0.1, 0.5, 0.5), text = c("Tie", "Win", "Loss"))
+
+g1 = ggplot(tie1_df) + geom_area(aes(x, prob, fill=type)) + guides(fill=FALSE) + 
+  geom_text(data=text_df, aes(x, y, label = text)) + xlab("Difference in Skill") + ylab("Probability") + 
+  scale_fill_manual(values = c(A.blue, A.red))
+g2 = ggplot(tie2_df) + geom_area(aes(x, prob, fill=type)) + guides(fill=FALSE) +
+  geom_text(data=text_df, aes(x, y, label = text)) + xlab("Difference in Skill") + ylab("Probability") +
+  scale_fill_manual(values = c(A.blue, A.red))
+
+grid.arrange(g1, g2, ncol = 2, widths = c(800, 800))
+```
+
+### Scale Parameters
+
+We now have a model that can handle all of the outcomes in our data and is fully specified. We have been fairly prescriptive with the model, however, in specifying the exact shape of the probability functions. A few scale parameters will help the model be more flexible to adapt to the data. Scale parameters on both the logistic probability of winning and probability of ties will allow these curves to expand or shrink to match the data. We also need to normalize the logistic probabilities from before so that all of our probabilities sum to 1. We have also introduced a few new parameters that need priors. The full model follows:
+
+$$
+\begin{align*}
+  \text{Pr}(i \; \text{ties} \; j) &= \frac{2\delta}{1 + e^{\sigma(\theta_j - \theta_i)^2}} \\
+  \text{Pr}(i \; \text{beats} \; j) &= (1-\text{Pr}(i \; \text{ties} \; j)) \frac{1}{1 + e^{\tau(\theta_j - \theta_i)}} \\
+  \text{Pr}(i \; \text{loses to} \; j) &= 1-\text{Pr}(i \; \text{ties} \; j) - \text{Pr}(i \; \text{beats} \; j) \\
+  \theta_i &\sim \text{N}(0,1) \\
+  \delta &\sim \text{Beta}(1, 9) \\
+  \sigma &\sim \text{Gamma}(0.5, 1) \\
+  \tau &\sim \text{Gamma}(1, 1)
+\end{align*}
+$$
+
+The priors for $\delta$, $\sigma$, and $\tau$ were chosen somewhat arbitrarily, but reflect my general expectations for these parameters. For example, the prior for $\delta$ was chosen with a small mean because I anticipate ties to occur infrequently in Dominion.
+
+### RStan Code
+
+```{r, include=FALSE}
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+setwd("C:/VM/ranking")
+#source('simulations.R')
+source('get_scores.R')
+fit = stan(file = 'ratings.stan', iter = 5000, chains = 8)
+```
+
+Now that we have the full model, we need to translate it to code for RStan. We'll start witht the `model` section, as it translates almost directly from the model description above:
+
+```{r, eval=FALSE}
+model{
+  int i;
+  int j;
+  real logit_i;
+  real draw;
+  vector[3] p;
+  delta ~ beta(1,9);
+  sigma ~ gamma(0.5, 1);
+  tau ~ gamma(1, 1);
+  for (player in 1:P)
+    theta[player] ~ normal(0,1);
+  for (g in 1:G){
+    i = players[g, 1];
+    j = players[g, 2];
+    logit_i = 1 / (1 + exp(tau*(theta[j] - theta[i])) );
+    draw = 2*delta / (1 + exp(sigma * (theta[j] - theta[i])^2));
+    p[1] = (1-draw) * logit_i;
+    p[2] = (1-draw) * (1-logit_i);
+    p[3] = draw;
+    results[g,] ~ multinomial(p);  
+  }
+}
+```
+
+In addition to the model definition above, we just need to declare a few variables to be used in the calculations. The `players` and `results` matrices contain the outcomes of each game and are defined in the `data` section:
+
+```{r, eval=FALSE}
+data{
+  int<lower=0> P;
+  int<lower=0> G;
+  int results[G, 3];
+  int players[G, 2];
+}
+```
+
+Each row of the `players` matrix records the indices of the players in the game, while each row of the `results` matrix contains the outcome as a 3-vector (win, lose, tie), as this is the format expected by RStan for a multinomial distribution.
+
+```{r}
+head(players)
+head(results)
+```
+
+Finally, we need to define the parameters to be estimated:
+
+```{r, eval=FALSE}
+parameters{
+  real theta[P];
+  real<lower=0, upper=1> delta;
+  real<lower=0> tau;
+  real<lower=0> sigma;
+}
+```
+
+As an extra step, you can also define any other quantities of interest to be reported in the output of the sampling. In this case, we may be interested in $\tau\theta_i$ for each player $i$, as this indicates where on the default logistic curve that player falls.
+
+```{r, eval=FALSE}
+generated quantities{
+  real theta_tau[P];
+  for (p in 1:P){
+    theta_tau[p] = theta[p] * tau;
+  }
+}
+```
+
+With all of this saved in `ratings.stan` and a script `get_scores.R` to prepare the data, we are ready to use RStan to fit our model. The script `get_scores.R` is not included here, but needs to define the variables `P`, `G`, `players`, and `results` to be consistent with our definitions in the `data` section of `ratings.stan`.
+
+```{r, eval=FALSE}
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+setwd("C:/VM/ranking")
+#source('simulations.R')
+source('get_scores.R')
+fit = stan(file = 'ratings.stan', iter = 5000, chains = 8)
+```
+
+The default print method of the fit object summarizes the results:
+```{r}
+fit
+```
+
+The full set of samples can accessed with the `extract` function. Note to watch out for collisions with the `extract` function from from the `tidyr` package.
+```{r}
+samples = rstan::extract(fit)
+names(samples)
+head(samples$tau)
+```
+```{r}
+head(samples$theta_tau)
+```
+
+Pre-computed summary statistics are also available through the `sumamry` attribute of the `summary` function.
+
+```{r}
+head(summary(fit)$summary)
+```
+
+I used the precomputed summary to plot a 95% credible interval for each player. The shaded region is the interval for a player that hasn't played any games yet.
+
+```{r, echo=FALSE}
+summ = summary(fit)$summary
+start = which(rownames(summ) == "theta_tau[1]")
+
+theta_tau = data.frame(summ[start:(start+P-1),c("mean", "2.5%", "97.5%")])
+
+
+df = data.frame(Player = names(translate), x = 1:P, low = theta_tau$X2.5., high = theta_tau$X97.5., mean = theta_tau$mean)
+
+no_games = df %>% filter(as.character(Player) == "Nobody")
+df = df %>% filter(as.character(Player) != "Nobody")
+
+df$no_low = no_games$low
+df$no_high = no_games$high
+df$no_mean = 0
+
+df$Player = factor(df$Player, levels = df$Player[order(-df$low)])
+
+N = nrow(df)
+
+ggplot(df) + geom_linerange(aes(x = Player, ymin = low, ymax = high, color = Player)) + guides(color = FALSE) + geom_point(aes(x = Player, y = mean, color = Player)) + geom_ribbon(aes(x = c(rep(0.4, N-1), N+0.6), ymin = no_low, ymax = no_high), alpha = 0.1) + geom_hline(aes(yintercept = 0), alpha = 0.3) + ylab("Skill")
+```

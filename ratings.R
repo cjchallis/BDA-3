@@ -1,0 +1,7 @@
+setwd("C:/VM/ranking")
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+#source('simulations.R')
+source('get_scores.R')
+fit = stan(file = 'ratings.stan', iter = 5000, chains = 8)

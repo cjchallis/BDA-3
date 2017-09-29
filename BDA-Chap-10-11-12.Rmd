@@ -1,0 +1,771 @@
+---
+title: "Bayesian Computation, BDA Chapters 10-12"
+author: "Chris Challis"
+date: "September 15, 2017"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: spacelab
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(animation)
+library(ggplot2)
+library(gridExtra)
+library(trapezoid)
+library(grid)
+source("~/adobe-palette.R")
+```
+
+## Introduction
+
+The key problem of Bayesian computation is essentially integration. Recall that 
+
+$$ p(\theta | y) \propto \mathcal{L}(y | \theta) p(\theta) $$
+
+where $\mathcal{L}(y | \theta)$ is the likehood of the data given the model parameters, $\theta$, $p(\theta)$ is the prior over the parameter space, and $p(\theta | y)$ is the posterior distribution of the parameters given the data. With this general relationship, we often have a closed form for a function that is proportional to the posterior distribution, so the problem is to calculate or approximate the normalizing constant for this function.
+
+---
+
+## Deterministic Integration
+
+The first method many think of for approximating an integral is a Riemann sum. Calculate the height of the function across some grid of points and sum the areas of the resulting rectangles.
+
+```{r, eval=FALSE, include=FALSE}
+target = function(x){
+  exp(-abs((x+1)^3)) + 0.5*exp(-abs((x-0.5)^3))
+}
+xx = (-300:300) / 100
+range = max(xx) - min(xx)
+
+curve = data.frame(x = xx, f = target(xx))
+
+g = ggplot(curve) + geom_area(aes(x, f), color = "#BBBBBB", fill = "#BBBBBB")
+g = g + xlab("") + ylab("")
+g = g + theme_bw()
+g = g + theme(panel.border = element_blank(),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank())
+g = g + theme(axis.text.y = element_blank(),
+              axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              axis.ticks.y = element_blank())
+g
+ani.options(interval = 0.2)
+
+saveGIF(
+  {
+    N = 25
+    area = NULL
+    for (k in 3:N){
+      grid = seq(min(xx), max(xx), length.out = k+1)[-(k+1)] + range/(2*k)
+      bars = data.frame(x = grid, f = target(grid))
+      q = g + geom_bar(data=bars, aes(x, f), stat="identity", fill = A.blue, alpha = 0.7)
+      q = q + ggtitle("Approximation")
+      q = q + theme(plot.title = element_text(size = 36, hjust = 0.5))
+      area = c(area, sum(target(grid) * range / k))
+      areas = data.frame(x = 3:(length(area)+2), f = area)
+      p = ggplot(areas) + geom_line(aes(x, f), size = 1.5, color = "#888888")
+      p = p + theme_bw()
+      p = p + xlab("") + ylab("") + ggtitle("Estimated Area")
+      p = p + theme(panel.border = element_blank(),
+                    panel.grid.major = element_blank(),
+                    panel.grid.minor = element_blank())
+      p = p + theme(axis.text.y = element_blank(),
+                    axis.text.x = element_blank(),
+                    axis.ticks.x = element_blank(),
+                    axis.ticks.y = element_blank(),
+                    plot.title = element_text(size = 36, hjust = 0.5))
+      p = p + scale_x_continuous(limits = c(3, N))
+      p = p + scale_y_continuous(limits = c(2.38,2.71))
+      print(grid.arrange(q, p, ncol = 2))
+    }
+  }, ani.width = 1800, ani.height = 800, movie.name = "~/BoQ/BDA/grid.gif", img.name = "g"
+)
+```
+
+![](C:/Users/challis/Documents/BoQ/BDA/grid.gif)
+
+In the example above, the approximation gets pretty good with only about 6 rectangles. The problem with this approach in applied settings is we usually hope to estimate a multi-dimensional set of parameters. To get similar fidelity of even this crude approximation for $N$ parameters we require a grid with $6^N$ points to be evaluated. Before we move to probabilistic methods, note that we can also use this method to approximate an arbitrary function $h(\theta)$ by weighting each point in the grid according to $h(\theta)$. Probabilistic methods will rely on this same principle.
+
+
+---
+
+## Probabilistic Approximations
+
+In general, probabilistic approximations aim to provide a sample from the posterior distribution. After the sample is obtained, the expectation of any quantity of interest $h(\theta)$ of the distribution can be approximated by 
+
+$$ E(h(\theta)|y) = \int h(\theta)p(\theta|y)d\theta \approx \frac{1}{S} \sum_{s=1}^{S}h(\theta^s) $$
+where the $\theta^s$ are the samples from the posterior.
+
+### Rejection Sampling
+
+Rejection sampling requires a distribution $g$ from which we know how to sample, and a constant $M$ for which $Mg(\theta) \ge p(\theta|y)$ for all $\theta$.
+
+1. Sample a value from the distribution $g$.
+2. Keep the value with probability equal to the ratio between $p(\theta|y)$ and $Mg(\theta)$, thus correcting for the difference between $p(\theta|y)$ and $Mg(\theta)$.
+
+```{r, eval=FALSE, include=FALSE, results=FALSE}
+
+target = function(x){
+  exp(-abs((x+1)^3)) + 0.5*exp(-abs((x-0.5)^3))
+}
+xx = (-300:300) / 100
+plot(xx, target(xx), type = "l")
+min = -3
+mode1 = -1.2
+mode2 = 0
+max = 3
+mult = 1.1 / dtrapezoid(mean(c(min, max)), min = min, mode1 = mode1, mode2 = mode2, max = max)
+
+dsamp = function(x){
+  mult * dtrapezoid(x, min = min, mode1 = mode1, mode2 = mode2, max = max)
+}
+
+lines(xx, mult * dtrapezoid(xx, min = min, mode1 = mode1, mode2 = mode2, max = max))
+
+N = 35
+samp = rtrapezoid(N, min = min, mode1 = mode1, mode2 = mode2, max = max)
+unif = runif(N, 0, 1)
+samp_dens = mult * dtrapezoid(samp, min = min, mode1 = mode1, mode2 = mode2, max = max)
+targ_dens = target(samp)
+rej_samp = samp[targ_dens / samp_dens > unif]
+plot(hist(rej_samp, breaks = 20))
+
+df = data.frame(x = xx, y = target(xx), type = "target")
+df = rbind(df, cbind(x = xx, y = dsamp(xx), type = "trap"))
+df$x = as.numeric(df$x)
+df$y = as.numeric(df$y)
+
+simul = function(x, a, b, c){
+  ceiling(a/(1+exp(-c*(x-b))))
+}
+
+
+curve(simul(x, 1000, 20, 0.4), from = 0, to = 30, n = 600)
+ani.options(interval=0.5)
+saveGIF(
+  {
+    samples = data.frame(x = c(-3.5, -3.5), type = c("orig", "rej"))
+    pt_size = 6
+    hist_max = 650
+    for (i in 1:N){
+      n = simul(i, 2000, 20, 0.4)
+      if (i > 30)
+        n = 1
+      if (i <= 5)
+        n = 1
+      s = rtrapezoid(n, min = min, mode1 = mode1, mode2 = mode2, max = max)
+      #s = rtrapezoid(1, min = min, mode1 = mode1, mode2 = mode2, max = max)
+      g1 = ggplot(df, aes(x=x, y=y)) +
+        geom_area(aes(fill=type), position = "identity", alpha = 0.3) +
+        scale_fill_manual(values = c(A.blue, A.red)) +
+        xlab("") + ylab("") + guides(fill=FALSE) +
+        ggtitle("Sampling Steps") + 
+        theme_bw() + 
+        theme(panel.border = element_blank(),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              axis.text.y = element_blank(),
+              axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              axis.ticks.y = element_blank(),
+              plot.title = element_text(size = 36, hjust = 0.5))
+        
+      g2 = ggplot(samples, aes(x=x)) +
+        geom_histogram(data=samples, fill = A.red, bins = 60, alpha = 0.3) +
+        geom_histogram(data=subset(samples, type=="rej"), fill = A.blue, bins = 60, alpha = 0.3) + 
+        scale_x_continuous(limits = c(-3, 3)) + 
+        scale_y_continuous(limits = c(0, hist_max)) + 
+        xlab("") + ylab("") +
+        ggtitle("Estimated Distribution") + 
+        theme_bw() + 
+        theme(panel.border = element_blank(),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              axis.text.y = element_blank(),
+              axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              axis.ticks.y = element_blank(),
+              plot.title = element_text(size = 36, hjust = 0.5))
+      
+      print(grid.arrange(g1 + geom_point(data = data.frame(x = s, y = 0), aes(x = x, y = y), size = pt_size), 
+                         g2, ncol=2))
+
+      un = runif(n, 0, 1)
+      print(grid.arrange(g1 + geom_point(data = data.frame(x = s, y = un * dsamp(s)),
+                                         aes(x = x, y = y), size = pt_size),
+                         g2, ncol=2))
+      
+      type = rep("orig", n)
+      type[target(s) / dsamp(s) > un] = "rej"
+      samples = rbind(samples, data.frame(x = s, type = type))
+      samples$x = as.numeric(samples$x)
+      
+      g2 = ggplot(samples, aes(x=x)) +
+        geom_histogram(data=samples, fill = A.red, bins = 60, alpha = 0.3) +
+        geom_histogram(data=subset(samples, type=="rej"), fill = A.blue, bins = 60, alpha = 0.3) + 
+        scale_x_continuous(limits = c(-3, 3)) + 
+        scale_y_continuous(limits = c(0, hist_max)) + 
+        xlab("") + ylab("") +
+        ggtitle("Estimated Distribution") + 
+        theme_bw() + 
+        theme(panel.border = element_blank(),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              axis.text.y = element_blank(),
+              axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              axis.ticks.y = element_blank(),
+              plot.title = element_text(size = 36, hjust = 0.5))
+      
+      print(grid.arrange(g1 + geom_point(data = data.frame(x = s, y = un * dsamp(s)),
+                                         aes(x = x, y = y, color = factor(type, levels = c("rej", "orig"))),
+                                         size = pt_size) + 
+                           scale_color_manual(values = c(A.green, A.red), drop = FALSE) +
+                           guides(color=FALSE),
+                         g2, ncol=2))
+    }
+  }, movie.name = "~/BoQ/BDA/rejection.gif", img_name = "r", convert = "convert",
+  ani.height = 800, ani.width = 1800
+)
+```
+
+![](C:/Users/challis/Documents/BoQ/BDA/rejection.gif)
+
+### Importance Sampling
+
+Importance sampling is similar to rejection sampling. Rather than requiring a function that dominates the posterior, we sample from a known distribution and then weight each sample according to the ratio between the sampling distribution and the unnormalized posterior.
+
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE, results=FALSE}
+target = function(x){
+  exp(-abs((x+1)^3)) + 0.5*exp(-abs((x-0.5)^3))
+}
+xx = (-300:300) / 100
+
+dsamp = function(x){
+  1/6
+}
+
+N = 35
+
+simul = function(x, a, b, c){
+  ceiling(a/(1+exp(-c*(x-b))))
+}
+
+df = data.frame(x = xx, y = target(xx), type = "target")
+df = rbind(df, cbind(x = xx, y = dsamp(xx), type = "trap"))
+df$x = as.numeric(df$x)
+df$y = as.numeric(df$y)
+
+#curve(simul(x, 1000, 20, 0.4), from = 0, to = 30, n = 600)
+ani.options(interval=0.5)
+saveGIF(
+  {
+    samples = data.frame(x = c(-3.5, -3.5), weight = c(1, 1))
+    pt_size = 6
+    hist_max = 2500
+    for (i in 1:N){
+      n = simul(i, 2000, 20, 0.4)
+      if (i > 30)
+        n = 1
+      if (i <= 5)
+        n = 1
+      s = runif(n, -3, 3)
+      g1 = ggplot(df, aes(x=x, y=y)) +
+        geom_area(aes(fill=type), position = "identity", alpha = 0.3) +
+        scale_fill_manual(values = c(A.blue, A.red)) +
+        xlab("") + ylab("") + guides(fill=FALSE) +
+        ggtitle("Sampling Steps") + 
+        theme_bw() + 
+        theme(panel.border = element_blank(),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              axis.text.y = element_blank(),
+              axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              axis.ticks.y = element_blank(),
+              plot.title = element_text(size = 36, hjust = 0.5))
+        
+      g2 = ggplot(samples, aes(x=x)) +
+        geom_histogram(aes(weight = weight), fill = A.blue, bins = 60, alpha = 0.3) +
+        geom_histogram(fill = A.red, bins = 60, alpha = 0.3) + 
+        scale_x_continuous(limits = c(-3, 3)) + 
+        scale_y_continuous(limits = c(0, hist_max)) + 
+        ggtitle("Estimated Distribution") +
+        xlab("") + ylab("") +
+        theme_bw() + 
+        theme(panel.border = element_blank(),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              axis.text.y = element_blank(),
+              axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              axis.ticks.y = element_blank(),
+              plot.title = element_text(size = 36, hjust = 0.5))
+      
+      print(grid.arrange(g1 + geom_point(data = data.frame(x = s, y = 0), aes(x = x, y = y), size = pt_size), 
+                         g2, ncol=2))
+
+      
+      weight = target(s) / dsamp(s)
+      samples = rbind(samples, data.frame(x = s, weight = weight))
+      samples$x = as.numeric(samples$x)
+      samples$weight = as.numeric(samples$weight)
+      
+      g2 = ggplot(samples, aes(x=x)) +
+        geom_histogram(aes(weight = weight), fill = A.blue, bins = 60, alpha = 0.3) +
+        geom_histogram(fill = A.red, bins = 60, alpha = 0.3) + 
+        scale_x_continuous(limits = c(-3, 3)) + 
+        scale_y_continuous(limits = c(0, hist_max)) + 
+        ggtitle("Estimated Distribution") + 
+        xlab("") + ylab("") +
+        theme_bw() + 
+        theme(panel.border = element_blank(),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              axis.text.y = element_blank(),
+              axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              axis.ticks.y = element_blank(),
+              plot.title = element_text(size = 36, hjust = 0.5))
+      
+      print(grid.arrange(g1 + geom_point(data = data.frame(x = s, y = weight / 6),
+                                         aes(x = x, y = y, size = pt_size * sqrt(weight))) + guides(size=FALSE) +
+                           scale_size_identity(),
+                         g2, ncol=2))
+    }
+  }, movie.name = "~/BoQ/BDA/importance.gif", img_name = "r", convert = "convert",
+  ani.height = 800, ani.width = 1800
+)
+```
+![](C:/Users/challis/Documents/BoQ/BDA/importance.gif)
+
+Importance sampling is easier to perform than rejection sampling in the sense that any distribution can be used, and the constant $M$ doesn't need to be calculated. However, the algorithm can perform poorly if there is large variance in the sampling weights, which usually results misaligning regions of low probability between the two distributions.
+
+
+---
+
+## Markov Chain Computation
+
+Because of the problems that arise in the previous methods with multidimensional parameter spaces, Markov chains have been the most successful method for approximating $p(\theta|y)$. In general, a Markov chain is a sequence of random variables where the distribution of each variable depends only on the most recent value. A Markov chain allows us to construct an iterative process where the marginal distribution of each value of the chain gets closer and closer to the posterior distribution.
+
+Another way to think about Markov chain Monte Carlo (MCMC) is an optimization algorithm with random movement injected so that the algorithm explores all of the important areas of a function. Rather than seeking only the maximum, it attempts to visit all of regions of the posterior that have non-trivial probability, and with frequency proportional to the probability density.
+
+### Gibbs Sampling
+
+Gibbs sampling breaks the parameter vector $\theta$ into components and iteratively samples each component conditional on the current values of all the rest. It is best illustrated with an example.
+
+#### Binomial-Beta-Poisson
+
+Assume we observe a single value $x$ from a binomal distribution, $x \sim \text{Bin}(n, \theta)$ and the priors for the binomial parameters are $\theta \sim \text{Beta}(a, b)$ and $n \sim \text{Poi}(\lambda)$. We are interested in the posterior distribution of $\theta$ and $n$, $p(n, \theta | x)$. We can easily write the joint distribution of $x, n$, and $\theta$:
+
+$$ p(x, n, \theta) = \binom{n}{x} \theta^x (1-\theta)^{n-x} \frac{\Gamma(a+b)}{\Gamma(a)\Gamma(b)} \theta^{a-1}(1-\theta)^{b-1} e^{-\lambda} \frac{\lambda^n}{n!} $$
+
+We can then specify the joint posterior of $n$ and $\theta$ up to proportionality:
+
+$$ p(n, \theta | x) \propto \frac{n!}{(n-x)!} \theta^x (1-\theta)^{n-x} \theta^{a-1}(1-\theta)^{b-1} \frac{\lambda^n}{n!} $$
+This is not a distribution in $n$ and $\theta$ that we know how to do anything with directly. However, we can take it a step further and derive the full conditionals of $n$ and $\theta$:
+
+$$
+\begin{align*}
+p(\theta|n, x) &\propto \theta^{x+a-1}(1-\theta)^{n-x+b-1} \\
+p(n|\theta, x) &\propto \frac{(1-\theta)^n \lambda^n}{(n-x)!} \propto \frac{\left[\lambda(1-\theta)\right]^{n-x}}{(n-x)!}
+\end{align*}
+$$
+So the full conditional of $\theta$ is a Beta distribution. The full conditional for $n$ is a bit trickier, but the form is similar to a Poisson distribution, and the term where we have no flexibility with proportionality is the $(n-x)!$ term, so we can reparameterize in terms of $n-x$ and arrive at $n-x \sim \text{Poi}(\lambda(1-\theta))$. Given a starting vector $(n^{(0)}, \theta^{(0)})$, we can alternately sample $n^{(t)}$ given $\theta^{(t-1)}$ and $\theta^{(t)}$ given $n^{(t)}$.
+
+```{r, include=FALSE}
+N = 100
+a = b = 1
+lambda = 15
+theta = 0.05
+n = 12
+x = 12
+thetas = theta
+ns = n
+ani.options(interval=0.2)
+saveGIF(
+  {
+    for (i in 1:N){
+      df = data.frame(n = ns, theta = thetas)
+      g = ggplot(df, aes(theta, n)) + geom_path(alpha = 0.25) + geom_point(size = 4, alpha = 0.5) + 
+          theme_bw() + scale_x_continuous(limits = c(0,1))
+      print(g)
+        
+      if (i %% 2 == 0){
+        theta = rbeta(1, x+a, n-x+b)
+      } else{
+        n = rpois(1, lambda*(1-theta)) + x
+      }
+      thetas = c(thetas, theta)
+      ns = c(ns, n)
+    }
+  }, ani.width = 800, ani.height = 800, movie.name = "Gibbs.gif"
+)
+```
+![](C:/Users/challis/Documents/BoQ/BDA/Gibbs.gif)
+
+Note that because we sample one parameter at a time, each move travels only along one axis. This can be problematic when there is a high degree of correlation between two parameters, causing mixing to occur very slowly. When possible, joint transitions should be used in these circumstances which update both parameters given all others.
+
+The intuition behind the Gibbs sampler is that each iteration is an exact draw from the posterior distribution, conditional upon the previous iteration. In most cases, this results in eventually exploring all high-probability regions, even when the starting point was in a very low-probability space.
+
+### Metropolis
+
+Like Gibbs, and any other MCMC algorithm, the Metropolis algorithm uses the current value for each parameter to propose a new value for each parameter. For Metropolis, we do not require the conditional distributions of the parameters. Instead, we choose a symmetrical *jumping* or *proposal* distribution, $J(\theta^*|\theta^{t-1})$ to generate new values of $\theta$. $J$ must be symmetric in the sense that $J(\theta_a|\theta_b) = J(\theta_b|\theta_a)$ for all $\theta_a, \theta_b$. Acceptance of a proposed value relies on the ratio of the posterior density:
+
+$$ r = \frac{p(\theta^*|y)}{p(\theta^{t-1}|y)} $$
+
+$\theta^t$ becomes $\theta^*$ with probability min$(r, 1)$, otherwise remains at $\theta^{t-1}$.Note that we can compute the ratio in posterior density because the unknown normalizing constant cancels from the numerator and denominator.
+
+```{r, eval=FALSE, include=FALSE}
+target = function(x){
+  exp(-abs((x+1)^3)) + 0.5*exp(-abs((x-0.5)^3))
+}
+xx = (-300:300) / 100
+
+dsamp = function(x){
+  1/6
+}
+
+N = 500
+
+simul = function(x, a, b, c){
+  ceiling(a/(1+exp(-c*(x-b))))
+}
+
+df = data.frame(x = xx, y = target(xx), type = "target")
+df$x = as.numeric(df$x)
+
+jumps = c(1, 20, 20, 20, 20, 16, 16, 12, 12, 10, 10, 8, 8, 6, 6, 4, 4, 2, 2, rep(1, N))
+intervals = cumsum(jumps)
+
+propose = intervals[(1:length(intervals)) %% 2 == 1]
+accept = intervals[(1:length(intervals)) %% 2 == 0]
+
+
+proposal = TRUE
+
+#curve(simul(x, 1000, 20, 0.4), from = 0, to = 30, n = 600)
+ani.options(interval=0.05)
+saveGIF(
+  {
+    theta = 0
+    samples = data.frame(x = c(theta))
+    pt_size = 6
+    hist_max = 50
+    for (i in 1:N){
+      
+      if (i %in% propose){
+        g1 = ggplot(df, aes(x=x, y=y)) +
+          geom_area(fill = A.blue, position = "identity", alpha = 0.3) +
+          scale_x_continuous(limits = c(-3.75, 3.75)) +
+          xlab("") + ylab("") + guides(fill=FALSE) +
+          ggtitle("Sampling Steps") + 
+          theme_bw() + 
+          theme(panel.border = element_blank(),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                axis.text.y = element_blank(),
+                axis.text.x = element_blank(),
+                axis.ticks.x = element_blank(),
+                axis.ticks.y = element_blank(),
+                plot.title = element_text(size = 36, hjust = 0.5))
+        
+        g2 = ggplot(samples, aes(x=x)) +
+          geom_histogram(fill = A.blue, bins = 60, alpha = 0.3) +
+          scale_x_continuous(limits = c(-3, 3)) + 
+          scale_y_continuous(limits = c(0, hist_max)) + 
+          ggtitle("Estimated Distribution") +
+          xlab("") + ylab("") +
+          theme_bw() + 
+          theme(panel.border = element_blank(),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                axis.text.y = element_blank(),
+                axis.text.x = element_blank(),
+                axis.ticks.x = element_blank(),
+                axis.ticks.y = element_blank(),
+                plot.title = element_text(size = 36, hjust = 0.5))
+        
+        p = rnorm(1, theta, 1.5)
+        proposal = TRUE
+      }
+      if (proposal){
+        pt_seg = data.frame(x = c(theta, p), zero = c(0, 0), dens = target(c(theta, p)))
+        print(grid.arrange(g1 + geom_point(data = pt_seg,
+                           aes(x, zero, color = c("a", "b")), size = pt_size) +
+                scale_color_manual(values = c(1, A.blue)) + guides(color=FALSE) +
+                geom_segment(data=pt_seg, aes(x=x, xend=x, y=zero, yend=dens, color = c("a","b")),
+                           size = 1.5, alpha = 0.7) + 
+                scale_color_manual(values = c(1, A.blue)), 
+                         g2, ncol=2))
+      }
+      
+      if (i %in% accept){
+        proposal = FALSE
+        r = target(p) / target(theta)
+        col = A.red
+        print(r)
+        if (runif(1) < r){
+          theta = p
+          col = A.green 
+        }
+        samples = rbind(samples, theta)
+      }
+      if (!proposal){
+        print(grid.arrange(g1 + geom_point(data = data.frame(x = c(theta, p), y = c(0, 0)), 
+                                           aes(x = x, y = y, color = c("a", "b")), size = pt_size) +
+                             scale_color_manual(values = c(1, col)) + guides(color=FALSE), 
+                           g2, ncol=2))
+      }
+    }
+  }, movie.name = "~/BoQ/BDA/metropolis.gif", img_name = "r", convert = "convert",
+  ani.height = 800, ani.width = 1800, img.name = "m"
+)
+```
+![](C:/Users/challis/Documents/BoQ/BDA/metropolis.gif)
+
+#### Convergence Proof Outline
+
+We won't go into too much detail around why the Metropolis algorithm converges to the posterior distribution, but it's useful to have some understanding of this. In summary, we need to show that the Markov chain produced by the Metropolis algorithm is stationary, and that the stationary distribution of the chain is the target posterior distribution.
+
+##### Stationarity
+
+Stationarity of a Markov chain means that distribution of the chain approaches a distribution that is invariant to the transition kernel. The figures below represent the distribution of the same discrete-space Markov chain over several iterations but from two different starting points. The sequence on the left reaches the equilibirum much faster, but the chain arrives at the same equilibrium regardless of the initial distribution.
+
+```{r, eval=FALSE, include=FALSE}
+hex = c(0:9, "a", "b", "c", "d", "e", "f")
+greys = rep("na", 16)
+for (i in 1:16){
+  greys[i] = paste(c("#", rep(hex[i], 6)), sep = "", collapse = "")
+}
+N = 8
+nonzero = c(0.1, 0.6, 0.3)
+
+row1 = c(nonzero[1] + nonzero[2], nonzero[3], rep(0, N-2))
+mat = row1
+for (i in 2:(N-1)){
+  mat = rbind(mat, c(rep(0,i-2), nonzero, rep(0, N-(i+1))))
+}
+
+mat = rbind(mat, c(rep(0, N-2), nonzero[1], sum(nonzero[2:3])))
+step = c(1, rep(0, N-2), 0)
+stepa = c(rep(0, N-1), 1)
+
+I = 110
+heat_df = data.frame(prob = 0, proba = 0, y = rep(1:N, I), iter = rep(1:I, each = N))
+cuts = c(-1, 0, 0.02, 0.03, 0.04, 0.05, 0.075, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1)
+
+ani.options(interval = 0.05)
+saveGIF(
+  {
+    for (i in 1:(I+20)){
+      if(i <= I){
+        heat_df$prob[heat_df$iter == i] = step
+        heat_df$proba[heat_df$iter == i] = stepa
+        heat_df$prob1 = cut(heat_df$prob, cuts)
+        heat_df$prob2 = cut(heat_df$proba, cuts)
+      }
+      g1 = ggplot(heat_df) + geom_tile(aes(iter, y, fill=prob1)) +
+        scale_fill_manual(values = greys[16:1]) + guides(fill=FALSE) + 
+        theme_bw() + xlab("") + ylab("") +
+        theme(panel.border = element_blank(),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                axis.text.y = element_blank(),
+                axis.text.x = element_blank(),
+                axis.ticks.x = element_blank(),
+                axis.ticks.y = element_blank())
+      g2 = ggplot(heat_df) + geom_tile(aes(iter, y, fill=prob2)) +
+        scale_fill_manual(values = greys[16:1]) + guides(fill=FALSE) + 
+        theme_bw() + xlab("") + ylab("") +
+        theme(panel.border = element_blank(),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                axis.text.y = element_blank(),
+                axis.text.x = element_blank(),
+                axis.ticks.x = element_blank(),
+                axis.ticks.y = element_blank())
+      print(grid.arrange(g2, g1, ncol=2))
+      if(i <= I){
+        step = step %*% mat
+        stepa = stepa %*% mat
+      }
+    }
+  }, ani.height = 800, ani.width = 1600, movie.name = "stationarity.gif"
+)
+
+```
+![](C:/Users/challis/Documents/BoQ/BDA/stationarity.gif)
+
+Stationarity  is a common property of Markov chains that holds as long as the Markov chain is:
+
+###### **1. Irreducible**
+
+The chain has positive probability of reaching any state from any other state. An example of a finite-state Markov transition matrix is given below, where the 4-state chain can be reduced into two separate two-state chains.
+
+$$\left( 
+\begin{matrix}
+  0.9 & 0.1 & 0 & 0 \\
+  0.1 & 0.9 & 0 & 0 \\
+  0 & 0 & 0.2 & 0.8 \\
+  0 & 0 & 0.8 & 0.2 
+\end{matrix}
+\right)
+$$
+
+###### **2. Aperiodic**
+
+There is no state that can only return to itself in multiples of $k > 1$. This occurs much more commonly in finite-state Markov chains, a trivial example is below, in which every state is periodic and requires exactly 4 steps to return.
+
+$$\left( 
+\begin{matrix}
+  0 & 1 & 0 & 0 \\
+  0 & 0 & 1 & 0 \\
+  0 & 0 & 0 & 1 \\
+  1 & 0 & 0 & 0 
+\end{matrix}
+\right)
+$$
+
+###### **3. Not Transient**
+
+For every state $i$, the chain eventually returns to state $i$ with probability 1. The most common type of $transient$ chain has absorbing states, as in the example below, where any starting point ends eventually in state 4 and never leaves: 
+
+$$\left( 
+\begin{matrix}
+  0.9 & 0.05 & 0.05 & 0 \\
+  0.5 & 0.4 & 0.1 & 0 \\
+  0.4 & 0.4 & 0.1 & 0.1 \\
+  0 & 0 & 0 & 1 
+\end{matrix}
+\right)
+$$
+
+In general, random walks on proper distributions are not transient. An interesting example of a random walk that changes behavior depending on the dimension. The random walk on integer coordinates where each dimension is incremented by either -1 or 1 independently is recurrent in 1 or 2 dimensions, but transient in 3 or more dimensions. Recurrence for a state is equivalent to showing that the expected number of visits to the state is infinite. The expected number of visits is the same as the sum of the probability of visiting the state at each step. After starting at the origin, the probability of any even step $2m$ returning to the origin is:
+
+$$ \left[\binom{2m}{m}2^{-2m}\right]^d $$
+
+where $d$ is the number of dimensions of the random walk. This can be approximated closely by Stirling's formula as:
+
+$$ (\pi m)^{-\frac{d}{2}} $$
+
+the sum of which is infinite iff $d \le 2$.
+
+##### Correct Stationary Distribution
+
+After being convinced that the chain is stationary, we need to show that the stationary distribution is indeed $p(\theta|y)$. One way to do this is to show that the posterior distribution is unchanged by the transition probabilities. That is, once we have a draw from $p(\theta|y)$, the marginal distribution of all further accepted values is also $p(\theta|y)$ (this is another definition of the equilibrium distribution). Assume then that the value at $t-1$ is drawon from $p(\theta|y)$, and without loss of generality consider two values $\theta_a$ and $\theta_b$ such that $p(\theta_b|y) \ge p(\theta_a|y)$. We then want to show that the joint distribution of $\theta^{t-1} $ and $\theta^t$ is symmetric, so that if $\theta^{t-1}$ is marginally distributed according to $p(\theta|y)$, then so is $\theta^t$. If the joint distribution is symmetric, we have $p(\theta^{t-1} = \theta_a, \theta^t = \theta_b) = p(\theta^{t-1} = \theta_b, \theta^t = \theta_a)$.
+
+$$ 
+\begin{align*}
+p(\theta^{t-1} = \theta_a, \theta^t = \theta_b) &= p(\theta_a|y)J(\theta_b|\theta_a)
+p(\theta^{t-1} = \theta_b, \theta^t = \theta_a) &= p(\theta_b|y)J(\theta_a|\theta_b) \frac{p(\theta_a|y)}{p(\theta_b|y)} \\
+&= p(\theta_a|y)J(\theta_b|\theta_a)
+\end{align*}
+$$
+where we can flip the indices in the proposal distribution because it was chosen to be symmetric. Thus the marginal distribution of $\theta^t$ is also $p(\theta|y)$, implying that the posterior is invariant to the Markov transition, and is thus the stationary distribution.
+
+### Metropolis-Hastings
+
+Metroplois-Hastings generalizes the Metropolis algorithm to allow for asymmetric proposal distributions. The acceptance ratio just needs to be adjusted by the probabilities of proposing $\theta^*$ from $\theta^{t-1}$ and vice-versa:
+
+$$ r = \frac{p(\theta^*|y)J(\theta^{t-1}|\theta^*)}{p(\theta^{t-1}|y)J(\theta^*|\theta^{t-1})} $$
+
+So if $\theta^*$ was very likely to be proposed, we must lower our probability of accepting it.
+
+### Hamiltonian Monte Carlo 
+
+The idea behind Hamiltonian Monte Carlo is to use the gradient of the posterior distribution to allow faster traversal of the distribution. The algorithm is still based on random jumps, but uses an auxiliary momentum variable which is updated by the gradient of the posterior to accelerate movement into regions of high probability, and slow or reverse movement into the tails of the distribution. The following website provides a good visual comparison of Gibbs, Metropolis-Hastings, and Hamiltonian Monte Carlo:
+
+http://twiecki.github.io/blog/2014/01/02/visualizing-mcmc/
+
+It is enough to know that Hamiltonian Monte Carlo is the leading method for MCMC, at least for many common distributions. This is the method employed by the popular software package Stan.
+
+
+---
+
+## Convergence Diagnostics
+
+The ugly secret of MCMC methods is that convergence to the stationary distribuion is only guaranteed after infinite samples. There is no way to prove that a chain has converged after a finite number of samples. Instead, we settle for diagnostics that can show a chain has *not* converged. If our chain(s) pass enough of these diagnostics, it seems safe to assume it has converged. The general idea behind most convergence diagnostics is to look for stationary behavior within chains and between chains. In the figure below, intra-chain diagnostics would not catch the problem on the left because each chain looks stationary. On the other hand, inter-chain comparisons would pass for the figure on the right, even though neither chain has achieved stationarity.
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE}
+
+ar1 = function(x, phi, c, s, t, b){
+    c + b*t + (x-(c+b*t))* phi + rnorm(1, 0, s) 
+}
+
+N = 1000
+x = xs = 1
+for (i in 2:N){
+  x = ar1(x, 0.8, 1, 0.3, i, 0)
+  xs = c(xs, x)
+}
+stat1 = xs
+
+
+x = xs = -2
+for (i in 2:N){
+  x = ar1(x, 0.8, -2, 0.3, i, 0)
+  xs = c(xs, x)
+}
+statn2 = xs
+
+x = xs = 1.5
+for (i in 2:N){
+  x = ar1(x, 0.8, 1.5, 0.3, i, -0.003)
+  xs = c(xs, x)
+}
+desc = xs
+
+x = xs = -1.5
+for (i in 2:N){
+  x = ar1(x, 0.8, -1.5, 0.3, i, 0.003)
+  xs = c(xs, x)
+}
+asc = xs
+
+stat = data.frame(rbind(
+  cbind(y = stat1, x = 1:N, type = 1),
+  cbind(y = statn2, x = 1:N, type = 2)
+))
+
+nonstat = data.frame(rbind(
+  cbind(y = desc, x = 1:N, type = 1),
+  cbind(y = asc, x = 1:N, type = 2)
+))
+
+g1 = ggplot(stat, aes(x, y, color = as.factor(type))) + geom_line() +
+  guides(color = FALSE) + 
+  theme_bw() + xlab("Iteration") + ylab("Simulation")
+
+g2 = ggplot(nonstat, aes(x, y, color = as.factor(type))) + geom_line() + 
+  guides(color = FALSE) + 
+  theme_bw() + xlab("Iteration") + ylab("Simulation")
+
+# print(grid.arrange(g1, g2, ncol = 2))
+
+g12 = arrangeGrob(g1, g2, ncol=2)
+grid.draw(g12)
+
+```
+
+Several versions of the convergence diagnostic $\hat{R}$ have been proposed. The current definition used by the authors of BDA 3, and implemented in Stan, involves a weighted average of the inter- and intra-chain variances.
+
+$$ \hat{R} = \sqrt{ \frac{\frac{n-1}{n}W + \frac{1}{n}B}{W} } $$
+where $W$ is the within chain variance and $B$ is the between chain variance. Specifically,
+
+$$
+\begin{align*}
+B &= \frac{n}{m-1} \sum_{j=1}^m(\bar{\psi_{.j}} - \bar{\psi_{..}})^2 \\
+W &= \frac{1}{m} \sum_{j=1}^m s^2_j
+\end{align*}
+$$
+
+where $\psi_{ij}$ is the $i$th sample of the $j$th chain (with $m$ chains total), $\psi_{.j}$ is the mean of the $j$th chain, and $s^2_j$ is the variance of the $j$ chain. $B$ is then the variance of the means around the grand mean, multipled by a factor of $n$. We look for values of $\hat{R}$ near one, the degree to which it exceeds one indicates the amount of improvement that could be expected by running the chain longer or improving efficiency of the transitions.
+
+Note that this definition of $\hat{R}$ would not identify the problem on the right of the figure above when defining the $m$ individual chains as the original sampling chains. The authors get around this by splitting each of the original $k$ chains into $l \ge 2$ pieces, resulting in $m = kl$ sub-chains. Now the inter-chain variance, $B$, also captures differences between different portions of the same original chain. The test is essentially looking for $B \to 0$, dividing by $W$ normalizes the diagnostic across parameters and applications.
